@@ -62,7 +62,7 @@ export default function SettingsModal({
                     }`}
                   >
                     {pid === "mock" && "🧪 Demo Mock"}
-                    {pid === "openai" && "OpenAI GPT-4"}
+                    {pid === "openai" && "OpenAI GPT"}
                     {pid === "claude" && "Anthropic Claude"}
                     {pid === "gemini" && "Google Gemini"}
                   </button>
