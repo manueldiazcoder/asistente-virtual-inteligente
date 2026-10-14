@@ -4,6 +4,12 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { CALIMA_SYSTEM_PROMPT } from "./system-prompts";
+import {
+  buildModelErrorMessage,
+  getModelCandidates,
+  isModelNotFoundError,
+  type RealProviderId,
+} from "./ai-models";
 
 class MockAIService implements IAIService {
   async sendMessage(
@@ -52,10 +58,24 @@ class MockAIService implements IAIService {
 }
 
 class VercelSDKService implements IAIService {
-  private provider: AIProviderId;
+  private provider: RealProviderId;
 
-  constructor(provider: AIProviderId) {
+  constructor(provider: RealProviderId) {
     this.provider = provider;
+  }
+
+  /** Crea el modelo del SDK para el proveedor, sin resolver el id todavía. */
+  private createModel(modelId: string, apiKey: string) {
+    switch (this.provider) {
+      case "openai":
+        // `.chat` usa la API de Chat Completions, que es la que este proyecto
+        // maneja. El resto de la familia del SDK va por Responses API.
+        return createOpenAI({ apiKey }).chat(modelId);
+      case "claude":
+        return createAnthropic({ apiKey }).chat(modelId);
+      case "gemini":
+        return createGoogleGenerativeAI({ apiKey }).chat(modelId);
+    }
   }
 
   async sendMessage(
@@ -67,42 +87,42 @@ class VercelSDKService implements IAIService {
       throw new Error(`API Key no configurada para ${this.provider}`);
     }
 
-    let model;
+    const modelMessages = messages.map((m) => ({
+      role: m.role as "user" | "assistant" | "system",
+      content: m.content,
+    }));
 
-    try {
-      switch (this.provider) {
-        case "openai":
-          model = createOpenAI({ apiKey }).chat("gpt-4-turbo");
-          break;
-        case "claude":
-          model = createAnthropic({ apiKey }).chat(
-            "claude-3-5-sonnet-20241022"
-          );
-          break;
-        case "gemini":
-          model = createGoogleGenerativeAI({ apiKey }).chat("gemini-2.0-flash");
-          break;
-        default:
-          throw new Error(`Provider no soportado: ${this.provider}`);
+    const candidates = getModelCandidates(this.provider);
+    const attempted: string[] = [];
+    let lastError: unknown;
+
+    // Se intenta el modelo preferido y, si la API dice que ya no existe, se
+    // baja a la siguiente reserva. Otros fallos (clave, saldo, red) no tienen
+    // nada que ver con el modelo, así que se propagan de inmediato.
+    for (const modelId of candidates) {
+      attempted.push(modelId);
+
+      try {
+        const { textStream } = await streamText({
+          model: this.createModel(modelId, apiKey),
+          system: CALIMA_SYSTEM_PROMPT,
+          messages: modelMessages,
+        });
+
+        for await (const chunk of textStream) {
+          onToken(chunk);
+        }
+
+        return;
+      } catch (error) {
+        if (!isModelNotFoundError(error)) throw error;
+        lastError = error;
       }
-
-      const { textStream } = await streamText({
-        model,
-        system: CALIMA_SYSTEM_PROMPT,
-        messages: messages.map((m) => ({
-          role: m.role as "user" | "assistant" | "system",
-          content: m.content,
-        })),
-      });
-
-      for await (const chunk of textStream) {
-        onToken(chunk);
-      }
-    } catch (error) {
-      const errorMsg =
-        error instanceof Error ? error.message : "Error desconocido";
-      throw new Error(`Error en ${this.provider}: ${errorMsg}`);
     }
+
+    throw new Error(
+      buildModelErrorMessage(this.provider, attempted, lastError)
+    );
   }
 }
 
